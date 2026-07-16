@@ -113,10 +113,11 @@ input,select,textarea{ font-family:var(--font-body); }
 .card-pad{ padding:20px; }
 
 .grid{ display:grid; gap:16px; }
-.grid-2{ grid-template-columns:1fr 1fr; }
-.grid-3{ grid-template-columns:repeat(3,1fr); }
-.grid-4{ grid-template-columns:repeat(4,1fr); }
-.grid-6{ grid-template-columns:repeat(6,1fr); }
+.grid-2{ grid-template-columns:repeat(2, minmax(0,1fr)); }
+.grid-3{ grid-template-columns:repeat(3, minmax(0,1fr)); }
+.grid-4{ grid-template-columns:repeat(4, minmax(0,1fr)); }
+.grid-6{ grid-template-columns:repeat(6, minmax(0,1fr)); }
+.routine-grid{ display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:12px; }
 @media(max-width:900px){ .grid-2,.grid-3,.grid-4,.grid-6{ grid-template-columns:1fr 1fr; } }
 
 .kpi{ padding:16px 18px; border-radius:var(--radius); position:relative; overflow:hidden; }
@@ -212,10 +213,22 @@ tr:last-child td{ border-bottom:none; }
   .menu-btn{ display:inline-flex !important; }
   .sidebar-backdrop{ display:none; position:fixed; inset:0; background:rgba(20,20,30,0.45); z-index:90; }
   .sidebar-backdrop.open{ display:block; }
-  .view{ padding:18px; }
-  .topbar{ padding:14px 16px; }
+  .view{ padding:14px; }
+  .topbar{ padding:12px 14px; }
+  .topbar h1{ font-size:18px; }
+  .grid-2, .grid-3, .grid-4{ grid-template-columns:1fr; }
   .grid-6{ grid-template-columns:1fr 1fr; }
-  .grid-3{ grid-template-columns:1fr 1fr; }
+  .routine-grid{ grid-template-columns:1fr; }
+  .between{ flex-wrap:wrap; gap:10px; align-items:flex-start; }
+  .between > .row{ flex-wrap:wrap; }
+  .row{ flex-wrap:wrap; }
+  input[type=text],input[type=number],input[type=date],select{ width:100% !important; max-width:100%; box-sizing:border-box; }
+  .day-arc{ flex-wrap:wrap; gap:14px 6px; padding:16px; }
+  .day-arc .arc-line{ display:none; }
+  .arc-node{ flex:0 0 30%; }
+  .kpi .value{ font-size:24px; }
+  canvas{ max-width:100%; }
+  h2{ font-size:19px; }
 }
 .menu-btn{
   display:none; align-items:center; justify-content:center; width:36px; height:36px;
@@ -947,7 +960,7 @@ function renderHabitsPage(){
     }).join("");
     const pct = Math.round(done/isos.length*100);
     const cur = streakForBoolSeries(iso=>!!(STATE.days[iso] && STATE.days[iso].habits[h.id]));
-    return `<tr><td style="font-weight:700;white-space:nowrap;position:sticky;left:0;background:inherit;"><div class="row" style="gap:6px;"><span>${escapeHtml(h.name)}</span><button class="icon-btn" onclick="deleteHabit('${h.id}')">✕</button></div></td>${cells}<td><b>${pct}%</b></td><td class="mono">🔥${cur}</td></tr>`;
+    return `<tr><td style="font-weight:700;white-space:nowrap;position:sticky;left:0;background:var(--card);box-shadow:2px 0 4px rgba(0,0,0,0.04);z-index:2;"><div class="row" style="gap:6px;"><span>${escapeHtml(h.name)}</span><button class="icon-btn" onclick="deleteHabit('${h.id}')">✕</button></div></td>${cells}<td><b>${pct}%</b></td><td class="mono">🔥${cur}</td></tr>`;
   }).join("") || "";
 
   return `
@@ -956,7 +969,7 @@ function renderHabitsPage(){
     <div class="row"><input type="text" id="newHabitName" placeholder="New habit name…" style="width:220px;"><button class="btn primary sm" onclick="addHabit()">+ Add Habit</button></div>
   </div>
   <div class="card card-pad" style="overflow-x:auto;">
-    ${STATE.habitsList.length ? `<table style="min-width:900px;"><thead><tr><th style="white-space:nowrap;position:sticky;left:0;background:var(--card);">Habit</th>${isos.map(iso=>`<th style="text-align:center;">${iso.slice(8)}</th>`).join("")}<th>%</th><th>Streak</th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty"><div class="big">✓</div>No habits yet — add your first one above.</div>`}
+    ${STATE.habitsList.length ? `<table style="min-width:900px;"><thead><tr><th style="white-space:nowrap;position:sticky;left:0;background:var(--card);box-shadow:2px 0 4px rgba(0,0,0,0.04);z-index:3;">Habit</th>${isos.map(iso=>`<th style="text-align:center;">${iso.slice(8)}</th>`).join("")}<th>%</th><th>Streak</th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty"><div class="big">✓</div>No habits yet — add your first one above.</div>`}
   </div>`;
 }
 function addHabit(){
@@ -1268,7 +1281,7 @@ function renderRoutinePage(){
     </div>`;
   }).join("");
   return `<p class="muted" style="margin-bottom:14px;">This weekly schedule auto-populates the Attendance checklist on each Day page. Set each subject's type and credit on the Attendance page — theory subjects typically meet 3×/week; labs follow credit (≥1.5 cr weekly, lower alternate weeks).</p>
-  <div class="grid" style="grid-template-columns:repeat(7,1fr);gap:12px;">${cols}</div>`;
+  <div class="routine-grid">${cols}</div>`;
 }
 function addRoutineSlot(dowIdx){
   const time = document.getElementById(`rt-time-${dowIdx}`).value.trim();
