@@ -204,17 +204,36 @@ tr:last-child td{ border-bottom:none; }
   .card{ box-shadow:none; border:1px solid #ccc; break-inside:avoid; }
 }
 @media(max-width:780px){
-  .sidebar{ display:none; }
+  .sidebar{
+    position:fixed; left:0; top:0; z-index:100; height:100vh;
+    transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 30px rgba(0,0,0,0.3);
+  }
+  .sidebar.open{ transform:translateX(0); }
+  .menu-btn{ display:inline-flex !important; }
+  .sidebar-backdrop{ display:none; position:fixed; inset:0; background:rgba(20,20,30,0.45); z-index:90; }
+  .sidebar-backdrop.open{ display:block; }
   .view{ padding:18px; }
+  .topbar{ padding:14px 16px; }
+  .grid-6{ grid-template-columns:1fr 1fr; }
+  .grid-3{ grid-template-columns:1fr 1fr; }
+}
+.menu-btn{
+  display:none; align-items:center; justify-content:center; width:36px; height:36px;
+  border-radius:9px; border:1px solid var(--border); background:var(--card); font-size:16px;
+  margin-right:10px; flex-shrink:0; color:var(--ink);
 }
 </style>
 </head>
 <body>
 <div id="app">
+  <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()"></div>
   <nav class="sidebar" id="sidebar"></nav>
   <div class="main">
     <div class="topbar">
-      <h1 id="pageTitle">Dashboard</h1>
+      <div class="row" style="gap:0;">
+        <button class="menu-btn" onclick="toggleSidebar()" aria-label="Menu">☰</button>
+        <h1 id="pageTitle">Dashboard</h1>
+      </div>
       <div class="actions" id="topActions"></div>
     </div>
     <div class="view" id="view"></div>
@@ -520,6 +539,7 @@ function navigate(page, params={}){
   ROUTE = {page, params};
   location.hash = "#"+page+(params.date ? "/"+params.date : "");
   render();
+  closeSidebar();
 }
 window.addEventListener("hashchange", ()=>{
   const h = location.hash.replace("#","");
@@ -527,6 +547,15 @@ window.addEventListener("hashchange", ()=>{
   if(page) ROUTE = {page, params: date?{date}:{}};
   render();
 });
+
+function toggleSidebar(){
+  document.getElementById("sidebar").classList.toggle("open");
+  document.getElementById("sidebarBackdrop").classList.toggle("open");
+}
+function closeSidebar(){
+  document.getElementById("sidebar").classList.remove("open");
+  document.getElementById("sidebarBackdrop").classList.remove("open");
+}
 
 function renderSidebar(){
   const sb = document.getElementById("sidebar");
