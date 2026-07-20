@@ -437,13 +437,26 @@ async function createGistForSync(){
   }
 }
 
+// Pull helper that can target an explicit id/token pair without relying on
+// what's already saved — used to safety-check a connection before committing
+// to it or auto-pushing anything.
+async function pullFromGistRaw(token, id){
+  const res = await fetch(`https://api.github.com/gists/${id}`, {
+    headers:{ "Authorization":"token "+token, "Accept":"application/vnd.github+json" }
+  });
+  if(!res.ok){
+    const body = await res.text().catch(()=> "");
+    throw new Error(`GitHub API ${res.status}: ${body.slice(0,200)}`);
+  }
+  const data = await res.json();
+  const file = data.files && data.files[GIST_FILENAME];
+  if(!file || !file.content) return undefined; // gist exists but has no tracker data yet
+  try{ return JSON.parse(file.content); }catch(e){ throw new Error("The data in that Gist isn't valid — wrong Gist ID?"); }
+}
 async function pullFromGist(){
   const token = getGistToken(), id = getGistId();
   if(!token || !id) return null;
-  const data = await ghFetch(`https://api.github.com/gists/${id}`);
-  const file = data.files && data.files[GIST_FILENAME];
-  if(!file || !file.content) return null;
-  try{ return JSON.parse(file.content); }catch(e){ return null; }
+  return (await pullFromGistRaw(token, id)) ?? null;
 }
 
 async function pushToGist(){
@@ -469,27 +482,37 @@ function scheduleAutoSync(){
   }, 2500);
 }
 
+// "Sync Now" on an already-connected device. Safe by construction: it only
+// ever pushes when a pull genuinely succeeded and local is at least as new —
+// a failed/ambiguous pull always aborts instead of falling through to a push,
+// so a network hiccup can never overwrite your real cloud data with a blank state.
 async function syncNowManual(){
   if(!gistConfigured()){ setSyncStatus("Set up your token and Gist first."); return; }
   if(SYNC_BUSY) return;
   SYNC_BUSY = true;
   setSyncStatus("Syncing…");
   try{
-    const cloud = await pullFromGist();
-    const cloudTime = cloud && cloud._meta ? cloud._meta.updatedAt||0 : 0;
-    const localTime = STATE._meta ? STATE._meta.updatedAt||0 : 0;
-    if(cloud && cloudTime > localTime){
-      STATE = cloud;
-      localStorage.setItem(STORE_KEY, JSON.stringify(STATE));
-      normalizeState();
-      setSyncStatus("Pulled newer data from the cloud (" + new Date().toLocaleTimeString() + ")");
-      render();
-    } else {
+    const token = getGistToken(), id = getGistId();
+    const cloud = await pullFromGistRaw(token, id); // undefined = empty gist (ok to seed), throws = real error
+    if(cloud === undefined){
       await pushToGist();
       setSyncStatus("Synced " + new Date().toLocaleTimeString());
+    } else {
+      const cloudTime = cloud._meta ? cloud._meta.updatedAt||0 : 0;
+      const localTime = STATE._meta ? STATE._meta.updatedAt||0 : 0;
+      if(cloudTime > localTime){
+        STATE = cloud;
+        localStorage.setItem(STORE_KEY, JSON.stringify(STATE));
+        normalizeState();
+        setSyncStatus("Pulled newer data from the cloud (" + new Date().toLocaleTimeString() + ")");
+        render();
+      } else {
+        await pushToGist();
+        setSyncStatus("Synced " + new Date().toLocaleTimeString());
+      }
     }
   }catch(e){
-    setSyncStatus("Sync failed: " + e.message);
+    setSyncStatus("Sync failed: " + e.message + " — nothing was overwritten.");
   }
   SYNC_BUSY = false;
 }
@@ -497,26 +520,75 @@ async function syncNowManual(){
 async function autoPullOnLoad(){
   if(!gistConfigured()) return;
   try{
-    const cloud = await pullFromGist();
-    const cloudTime = cloud && cloud._meta ? cloud._meta.updatedAt||0 : 0;
-    const localTime = STATE._meta ? STATE._meta.updatedAt||0 : 0;
-    if(cloud && cloudTime > localTime){
-      STATE = cloud;
-      localStorage.setItem(STORE_KEY, JSON.stringify(STATE));
-      normalizeState();
-      render();
+    const token = getGistToken(), id = getGistId();
+    const cloud = await pullFromGistRaw(token, id);
+    if(cloud !== undefined){
+      const cloudTime = cloud._meta ? cloud._meta.updatedAt||0 : 0;
+      const localTime = STATE._meta ? STATE._meta.updatedAt||0 : 0;
+      if(cloudTime > localTime){
+        STATE = cloud;
+        localStorage.setItem(STORE_KEY, JSON.stringify(STATE));
+        normalizeState();
+        render();
+      }
     }
     setSyncStatus("Synced " + new Date().toLocaleTimeString());
   }catch(e){
-    setSyncStatus("Couldn't reach GitHub: " + e.message);
+    setSyncStatus("Couldn't reach GitHub: " + e.message + " — using your local data for now.");
   }
 }
+
+// Connecting to an EXISTING Gist (2nd, 3rd, ... device) is pull-only by
+// design: it must never push before it has proven it can fetch the real
+// shared data, or a fresh/blank device could silently wipe the cloud copy.
+async function connectExistingGist(){
+  const token = document.getElementById("gistTokenInput").value.trim();
+  const id = document.getElementById("gistIdInput").value.trim();
+  if(!token || !id){ setSyncStatus("Enter both the token and the Gist ID."); return; }
+  setSyncStatus("Connecting — fetching your existing data…");
+  try{
+    const cloud = await pullFromGistRaw(token, id);
+    if(cloud === undefined){
+      setSyncStatus("That Gist doesn't have tracker data in it yet — double-check the Gist ID from your first device's Settings page.");
+      return;
+    }
+    // only now, having confirmed real data exists, do we commit the credentials
+    setGistToken(token);
+    setGistId(id);
+    STATE = cloud;
+    localStorage.setItem(STORE_KEY, JSON.stringify(STATE));
+    normalizeState();
+    setSyncStatus("Connected — pulled your data from the cloud (" + new Date().toLocaleTimeString() + ")");
+    render();
+  }catch(e){
+    setSyncStatus("Couldn't connect: " + e.message + " — your local data was not touched.");
+  }
+}
+
 function disconnectGist(){
   if(!confirm("Disconnect cloud sync? Your data stays on this device either way.")) return;
   localStorage.removeItem(GIST_TOKEN_KEY);
   localStorage.removeItem(GIST_ID_KEY);
   setSyncStatus("");
   render();
+}
+function toggleTokenVisibility(){
+  const el = document.getElementById("tokenRevealText");
+  if(!el) return;
+  const hidden = el.dataset.hidden !== "false";
+  el.textContent = hidden ? getGistToken() : "•".repeat(Math.min(20, getGistToken().length));
+  el.dataset.hidden = hidden ? "false" : "true";
+  const btn = document.getElementById("tokenRevealBtn");
+  if(btn) btn.textContent = hidden ? "Hide" : "Show";
+}
+function copyToken(){
+  const token = getGistToken();
+  navigator.clipboard.writeText(token).then(()=>{
+    const btn = document.getElementById("copyTokenBtn");
+    if(btn){ const old = btn.textContent; btn.textContent = "Copied ✓"; setTimeout(()=>btn.textContent=old, 1200); }
+  }).catch(()=>{
+    setSyncStatus("Couldn't copy automatically — long-press the token text to copy it manually.");
+  });
 }
 
 /* ============================================================
@@ -1610,20 +1682,28 @@ function renderSettingsPage(){
   <div class="grid grid-2">
     <div class="card card-pad" style="grid-column:1/-1;">
       <div class="section-title">☁️ Cloud Sync — GitHub Gist <span class="tag">${configured?'connected':'not set up'}</span></div>
-      <p class="muted">This links the app to a private Gist (a plain text file) on your own GitHub account — not a real database, just one shared JSON file both your phone and PC can read and write. Data still lives in your GitHub account, under your control.</p>
+      <p class="muted">This links the app to a private Gist (a plain text file) on your own GitHub account — not a real database, just one shared JSON file every device you connect can read and write. Data still lives in your GitHub account, under your control.</p>
       ${configured ? `
         <div class="row" style="margin-bottom:10px;">
           <button class="btn primary" onclick="syncNowManual()">Sync Now</button>
           <button class="btn danger sm" onclick="disconnectGist()">Disconnect</button>
           <span id="syncStatusText" class="muted" style="font-size:12px;">${LAST_SYNC_MSG || 'Not synced yet this session.'}</span>
         </div>
-        <div class="muted" style="font-size:11px;">Gist ID: <span class="mono">${getGistId()}</span> — changes also auto-sync ~2.5s after you stop editing.</div>
+        <div class="muted" style="font-size:11px;margin-bottom:10px;">Gist ID: <span class="mono">${getGistId()}</span> — changes also auto-sync ~2.5s after you stop editing.</div>
+        <div class="divider"></div>
+        <div class="section-title" style="font-size:12.5px;">Add another device (3rd, 4th, …)</div>
+        <p class="muted" style="font-size:12px;">On the new device's Settings page, use "Connect to existing Gist" with this same token and Gist ID — never "Create & Connect" again, that makes a brand new empty Gist.</p>
+        <div class="row">
+          <span id="tokenRevealText" data-hidden="true" class="mono" style="font-size:12.5px;background:var(--paper);padding:6px 10px;border-radius:8px;flex:1;">${'•'.repeat(Math.min(20, getGistToken().length))}</span>
+          <button class="btn sm" id="tokenRevealBtn" onclick="toggleTokenVisibility()">Show</button>
+          <button class="btn sm" id="copyTokenBtn" onclick="copyToken()">Copy</button>
+        </div>
       ` : `
         <ol class="muted" style="margin:0 0 12px 18px;padding:0;font-size:12.5px;line-height:1.7;">
           <li>Go to <span class="mono">github.com/settings/tokens</span> → <b>Generate new token (classic)</b></li>
           <li>Give it any name, check only the <b>gist</b> scope, generate it, and copy the token</li>
-          <li>Paste it below and click "Create & Connect" — do this once, on your first device</li>
-          <li>On your <b>second device</b>, paste the <i>same token</i> and the <b>Gist ID</b> shown here after step 3, then click "Connect to existing Gist"</li>
+          <li>Paste it below and click "Create & Connect" — do this <b>once only</b>, on the device that already has your real data</li>
+          <li>On <b>every other device</b> (2nd, 3rd, …), paste the <i>same token</i> and the <b>Gist ID</b> (shown on the connected device's Settings page) and click "Connect to existing Gist" — this only pulls, it never overwrites the cloud copy</li>
         </ol>
         <div class="row" style="flex-wrap:wrap;">
           <input type="text" id="gistTokenInput" placeholder="GitHub token (starts with ghp_...)" style="width:260px;">
@@ -1658,13 +1738,6 @@ function renderSettingsPage(){
       <button class="btn danger" onclick="resetAllData()">Reset all data</button>
     </div>
   </div>`;
-}
-function connectExistingGist(){
-  const token = document.getElementById("gistTokenInput").value.trim();
-  const id = document.getElementById("gistIdInput").value.trim();
-  if(!token || !id){ setSyncStatus("Enter both the token and the Gist ID."); return; }
-  setGistToken(token); setGistId(id);
-  syncNowManual().then(()=>render());
 }
 function downloadBackup(){
   const blob = new Blob([JSON.stringify(STATE, null, 2)], {type:"application/json"});
