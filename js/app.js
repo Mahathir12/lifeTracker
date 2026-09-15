@@ -47,19 +47,11 @@ function attendancePrediction(attended, total, target){
   const needToAttend = pct >= target ? 0 : Math.max(0, Math.ceil((target*total - attended) / (1-target)));
   return {canMiss, needToAttend, pct: pct*100};
 }
-function ctBestNStats(cts, n){
-  if(!cts.length) return {all:[], bestSet:new Set(), highest:null, lowest:null, allAvgPct:null, bestAvgPct:null};
-  const withPct = cts.map(c=>({...c, pct: c.outOf ? (c.marks/c.outOf*100) : 0}));
-  const sorted = withPct.slice().sort((a,b)=>b.pct-a.pct);
-  const bestSet = new Set(sorted.slice(0, n).map(c=>c.id));
-  const allAvgPct = withPct.reduce((a,c)=>a+c.pct,0)/withPct.length;
-  const bestAvgPct = sorted.slice(0,n).reduce((a,c)=>a+c.pct,0)/Math.min(n, sorted.length);
-  const highest = sorted[0].pct, lowest = sorted[sorted.length-1].pct;
-  return {all:withPct, bestSet, highest, lowest, allAvgPct, bestAvgPct};
-}
 const uid = () => Math.random().toString(36).slice(2,10);
 
-const DATA_VERSION = 3;
+const DATA_VERSION = 4;
+const CT_DEFAULT_COUNT = 4;
+const CT_DEFAULT_OUT_OF = 20;
 const DEFAULT_TASK_CATEGORIES = ["Lab Report","Assignment","Daily Reading","Academic Study","Personal","Others"];
 const MONEY_SOURCES = ["Family","Father","Mother","Salary","Refund","Friend","Other"];
 const PERSON_TXN_TYPES = ["I paid for them","They paid for me","I sent them money","They sent me money","Shared expense","Other"];
@@ -96,6 +88,7 @@ function defaultState(){
       projects: [], // {id,title,area,question,problem,abstract,keywords,supervisor,collaborators,status,progress,startDate,deadline,lastUpdated,notesUrl,githubUrl,datasetUrl}
       papers: []    // {id,title,authors,year,journal,url,pdfUrl,area,status,findings,notes,rating,tags}
     },
+    settings: { theme:"light", animations:true },
     taskCategories: DEFAULT_TASK_CATEGORIES.slice(),
     ctBestN: 3,
     trash: [], // {id, text, category, priority, description, notes, url, deadline, originalDate, deletedDate}
@@ -149,6 +142,9 @@ function migrateState(fromVersion){
   if(fromVersion < 3){
     migrateV2ToV3();
   }
+  if(fromVersion < 4){
+    migrateV3ToV4();
+  }
   STATE.dataVersion = DATA_VERSION;
 }
 function migrateV1ToV2(){
@@ -185,7 +181,27 @@ function migrateV2ToV3(){
     if(b.category===undefined) b.category = "";
   });
 }
+function migrateV3ToV4(){
+  if(!STATE.settings) STATE.settings = {theme:"light", animations:true};
+  // attendance manual entry gained a countingMode ("held" vs "total")
+  (STATE.subjects||[]).forEach(s2=>{
+    if(s2.manualAttendance && !s2.manualAttendance.countingMode) s2.manualAttendance.countingMode = "total";
+  });
+  // tasks gained a partial-progress percentage
+  Object.values(STATE.days||{}).forEach(day=>{
+    (day.tasks||[]).forEach(t=>{ if(t.progress===undefined) t.progress = t.done ? 100 : 0; });
+  });
+  // ct marks gained outOf default of 20 and are keyed per theory subject
+  (STATE.ctMarks||[]).forEach(c=>{ if(!c.outOf) c.outOf = CT_DEFAULT_OUT_OF; });
+  // existing theory subjects now get their automatic CT slots (without
+  // touching any marks already entered), and labs lose stray CT rows
+  (STATE.subjects||[]).forEach(s2=>{
+    if(s2.type === "Theory") seedCtSlots(s2.id);
+  });
+}
 function normalizeState(){
+  if(!STATE.settings) STATE.settings = {theme:"light", animations:true};
+  if(!STATE.settings.theme) STATE.settings.theme = "light";
   (STATE.subjects||[]).forEach(s=>{
     if(!s.type) s.type = "Theory";
     if(s.credit===undefined || s.credit===null) s.credit = 3;
@@ -206,6 +222,10 @@ function normalizeState(){
   ["papers","cse","eee"].forEach(k=>{
     (STATE.dev[k]||[]).forEach(it=>{ if(!it.subtasks) it.subtasks = []; });
   });
+  Object.values(STATE.days||{}).forEach(day=>{
+    (day.tasks||[]).forEach(t=>{ if(t.progress===undefined) t.progress = t.done ? 100 : 0; });
+  });
+  (STATE.ctMarks||[]).forEach(c=>{ if(!c.outOf) c.outOf = CT_DEFAULT_OUT_OF; });
 }
 function saveState(){
   if(!STATE._meta) STATE._meta = {};
@@ -456,6 +476,7 @@ const NAV = [
     {id:"tasks", label:"Tasks", ic:"▤"},
     {id:"trash", label:"Trash", ic:"🗑"},
     {id:"attendance", label:"Attendance", ic:"▣"},
+    {id:"ct", label:"CT Marks", ic:"📝"},
     {id:"journal", label:"Journal", ic:"✎"},
   ]},
   {group:"Academic & Growth", items:[
@@ -469,6 +490,10 @@ const NAV = [
     {id:"expenses", label:"Expenses & Funds", ic:"৳"},
     {id:"finance", label:"Money In & Overview", ic:"📥"},
     {id:"people", label:"People & Money", ic:"👥"},
+  ]},
+  {group:"Insight", items:[
+    {id:"review", label:"Weekly / Monthly", ic:"📊"},
+    {id:"reminders", label:"Reminders", ic:"🔔"},
   ]},
   {group:"Tools", items:[
     {id:"importpdf", label:"Import PDF", ic:"⇪"},
@@ -502,9 +527,14 @@ function closeSidebar(){
 
 function renderSidebar(){
   const sb = document.getElementById("sidebar");
+  const theme = (STATE.settings && STATE.settings.theme) || "light";
   let html = `<div class="brand">
-    <div class="name">Mahathir's<br>Life Tracker</div>
-    <div class="sub">RUET · ECE</div>
+    <div class="name">Life Tracker</div>
+    <div class="sub">Plan · Track · Learn · Build</div>
+  </div>
+  <div class="theme-toggle">
+    <button class="${theme==='light'?'active':''}" onclick="setTheme('light')">🕷 SPIDER</button>
+    <button class="${theme==='dark'?'active':''}" onclick="setTheme('dark')">🦇 BATMAN</button>
   </div>`;
   NAV.forEach(g=>{
     html += `<div class="nav-group"><div class="nav-label">${g.group}</div>`;
@@ -520,10 +550,10 @@ function renderSidebar(){
 
 const PAGE_TITLES = {
   dashboard:"Dashboard", calendar:"Calendar", prayers:"Prayers", habits:"Habits",
-  tasks:"Tasks", trash:"Trash", attendance:"Attendance", journal:"Journal", expenses:"Expenses & Funds",
+  tasks:"Tasks", trash:"Trash", attendance:"Attendance", ct:"CT Marks", journal:"Journal", expenses:"Expenses & Funds",
   finance:"Money In & Overview", people:"People & Money",
   reading:"Reading", routine:"Class Routine", dev:"Development Progress",
-  courses:"Courses", research:"Research Hub",
+  courses:"Courses", research:"Research Hub", review:"Weekly / Monthly Review", reminders:"Reminder Center",
   importpdf:"Import from PDF", settings:"Settings & Data", day:"Day"
 };
 
@@ -541,6 +571,7 @@ function render(){
     case "tasks": title.textContent="Tasks"; view.innerHTML = renderTasksPage(); break;
     case "trash": title.textContent="Trash"; view.innerHTML = renderTrashPage(); break;
     case "attendance": title.textContent="Attendance"; view.innerHTML = renderAttendancePage(); break;
+    case "ct": title.textContent="CT Marks"; view.innerHTML = renderCtPage(); break;
     case "journal": title.textContent="Journal"; view.innerHTML = renderJournalPage(); break;
     case "expenses": title.textContent="Expenses & Funds"; view.innerHTML = renderExpensesPage(); afterRenderExpenses(); break;
     case "finance": title.textContent="Money In & Overview"; view.innerHTML = renderFinancePage(); break;
@@ -550,6 +581,8 @@ function render(){
     case "dev": title.textContent="Development Progress"; view.innerHTML = renderDevPage(); break;
     case "courses": title.textContent="Courses"; view.innerHTML = renderCoursesPage(); break;
     case "research": title.textContent="Research Hub"; view.innerHTML = renderResearchPage(); break;
+    case "review": title.textContent="Weekly / Monthly Review"; view.innerHTML = renderReviewPage(); break;
+    case "reminders": title.textContent="Reminder Center"; view.innerHTML = renderRemindersPage(); break;
     case "importpdf": title.textContent="Import from PDF"; view.innerHTML = renderImportPdfPage(); break;
     case "settings": title.textContent="Settings & Data"; view.innerHTML = renderSettingsPage(); break;
     default: view.innerHTML = "<p>Not found.</p>";
@@ -601,10 +634,23 @@ function renderCalendar(){
     let dots = "";
     for(let i=0;i<5;i++) dots += `<span class="${i<pp.done ? 'on':''}"></span>`;
     const habitPct = hp && hp.total ? Math.round((hp.done/hp.total)*100) : 0;
-    cells += `<div class="cal-cell ${isToday?'today':''}" onclick="navigate('day',{date:'${iso}'})">
-      <div class="cal-date">${d}${isToday?' <span style=\"color:var(--accent-red)\">•today</span>':''}</div>
+    const dayObj = STATE.days[iso];
+    const comp = dayObj ? dailyCompletion(iso).overall : 0;
+    // tiny kind indicators — only shown when that kind actually has something
+    const kinds = [];
+    if(dayObj){
+      if(dayObj.tasks && dayObj.tasks.length) kinds.push('<i class="k-task" title="tasks"></i>');
+      if(dayObj.concept && dayObj.concept.topic) kinds.push('<i class="k-study" title="concept / study"></i>');
+      if(dayObj.journal && dayObj.journal.trim()) kinds.push('<i class="k-read" title="journal"></i>');
+      if(dayObj.attendance && Object.keys(dayObj.attendance).length) kinds.push('<i class="k-att" title="attendance"></i>');
+      if(dayObj.tasks && dayObj.tasks.some(t=>!t.done && (t.deadline===iso))) kinds.push('<i class="k-due" title="deadline"></i>');
+    }
+    if(STATE.ctMarks.some(c=>c.date===iso && c.marks!==null)) kinds.push('<i class="k-ct" title="CT"></i>');
+    cells += `<div class="cal-cell ${isToday?'today':''}" onclick="navigate('day',{date:'${iso}'})" title="${comp}% complete">
+      <div class="cal-date">${d}${isToday?' <span style=\"color:var(--accent)\">•today</span>':''}</div>
       <div class="cal-dots">${dots}</div>
-      <div class="cal-mini-bar"><div class="cal-mini-fill" style="width:${habitPct}%"></div></div>
+      ${kinds.length?`<div class="cal-kind">${kinds.join("")}</div>`:''}
+      <div class="cal-mini-bar"><div class="cal-mini-fill" style="width:${comp}%"></div></div>
     </div>`;
   }
   const dowHeader = ["Sat","Sun","Mon","Tue","Wed","Thu","Fri"].map(d=>`<div class="cal-dow">${d}</div>`).join("");
@@ -627,7 +673,12 @@ function renderCalendar(){
   </div>
   <div class="row" style="margin-top:14px; gap:16px; font-size:12px; color:var(--ink-soft);">
     <div class="row" style="gap:5px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--success);display:inline-block;"></span> prayer logged</div>
-    <div class="row" style="gap:5px;"><span style="width:22px;height:5px;border-radius:3px;background:var(--accent-red);display:inline-block;"></span> habit completion for that day</div>
+    <div class="row" style="gap:5px;"><span style="width:22px;height:5px;border-radius:3px;background:var(--accent);display:inline-block;"></span> daily completion %</div>
+    <div class="row" style="gap:5px;"><i style="width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;"></i> tasks</div>
+    <div class="row" style="gap:5px;"><i style="width:6px;height:6px;border-radius:50%;background:var(--accent-2);display:inline-block;"></i> concept</div>
+    <div class="row" style="gap:5px;"><i style="width:6px;height:6px;border-radius:50%;background:var(--success);display:inline-block;"></i> attendance</div>
+    <div class="row" style="gap:5px;"><i style="width:6px;height:6px;border-radius:50%;background:var(--warn);display:inline-block;"></i> CT</div>
+    <div class="row" style="gap:5px;"><i style="width:6px;height:6px;border-radius:50%;background:var(--danger);display:inline-block;"></i> deadline</div>
   </div>`;
 }
 function calShift(delta){
@@ -712,11 +763,17 @@ function renderDay(iso){
           ${t.deadline ? `<span class="badge ${t.deadline<todayISO() && !t.done?'bad':'neutral'}">due ${fmtShort(t.deadline)}</span>` : ''}
         </div>
         ${t.description ? `<div class="muted" style="font-size:12px;margin-top:4px;">${escapeHtml(t.description)}</div>` : ''}
+        ${!t.done ? `<div class="row" style="gap:8px;margin-top:8px;">
+          <input type="range" class="speed-range" min="0" max="100" step="5" value="${Number(t.progress)||0}"
+                 style="flex:1;max-width:200px;" oninput="setTaskProgress('${iso}','${t.id}',this.value,true)">
+          <span class="mono" id="tp-${t.id}" style="font-size:12px;font-weight:700;width:42px;">${Number(t.progress)||0}%</span>
+        </div>` : ''}
       </div>
       ${!t.done ? `<div class="row" style="gap:4px;">
-        <button class="btn sm" onclick="moveTaskToTomorrow('${iso}','${t.id}')" title="Move to tomorrow">→Tomorrow</button>
+        <button class="btn sm primary" onclick="completeTask('${iso}','${t.id}')" title="Mark complete">✅</button>
+        <button class="btn sm" onclick="moveTaskToTomorrow('${iso}','${t.id}')" title="Move to tomorrow">📅 Tomorrow</button>
         <input type="date" id="moveDate-${t.id}" style="width:130px;">
-        <button class="btn sm" onclick="moveTaskToChosenDate('${iso}','${t.id}')">Move</button>
+        <button class="btn sm" onclick="moveTaskToChosenDate('${iso}','${t.id}')" title="Move to chosen date">📆 Move</button>
         <button class="icon-btn" onclick="trashTask('${iso}','${t.id}')" title="Move to trash">🗑</button>
       </div>` : `<button class="icon-btn" onclick="trashTask('${iso}','${t.id}')" title="Move to trash">🗑</button>`}
     </div>`).join("") || `<div class="empty">No tasks logged for this day yet.</div>`;
@@ -761,15 +818,40 @@ function renderDay(iso){
     </div>`).join("") || `<div class="empty">No expenses logged for this day.</div>`;
   const fundOptions = STATE.funds.map(f=>`<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)}</option>`).join("");
 
+  const comp = dailyCompletion(iso);
+  const brkRows = comp.parts.map(p=>`
+    <div class="brk">
+      <div class="brk-label">${p.key}</div>
+      <div class="brk-bar"><div class="brk-fill" style="width:${p.pct}%;"></div></div>
+      <div class="brk-val">${p.raw}</div>
+    </div>`).join("");
+  const isToday = iso === todayISO();
+
   return `
   <div class="between no-print" style="margin-bottom:16px;">
     <div class="row">
       <button class="btn sm" onclick="navigate('day',{date:'${prevIso}'})">← ${fmtShort(prevIso)}</button>
-      <button class="btn sm" onclick="navigate('calendar')">▦ Calendar</button>
+      <button class="btn sm ${isToday?'primary':''}" onclick="navigate('day',{date:'${todayISO()}'})">Today</button>
       <button class="btn sm" onclick="navigate('day',{date:'${nextIso}'})">${fmtShort(nextIso)} →</button>
+      <input type="date" value="${iso}" style="width:150px;" onchange="if(this.value)navigate('day',{date:this.value})">
+      <button class="btn sm" onclick="navigate('calendar')">▦ Calendar</button>
     </div>
     <div class="row">
-      <button class="btn sm" onclick="window.print()">⇩ Export / Print this day</button>
+      <button class="btn sm" onclick="window.print()">⇩ Export / Print</button>
+    </div>
+  </div>
+
+  <div class="card card-pad" style="margin-bottom:20px;">
+    <div class="hud-ring-wrap">
+      ${speedometerSvg(comp.overall, 150, isToday ? "TODAY" : fmtShort(iso))}
+      <div style="flex:1;min-width:240px;">
+        <div class="section-title" style="margin-bottom:6px;">Daily Completion</div>
+        <div class="hud-big">${comp.overall}%</div>
+        <div class="hud-sub">${comp.overall} / 100 · ${BD_DOW_NAMES[dowIndexBD(iso)]}, ${fmtDate(iso)}</div>
+      </div>
+      <div style="flex:1.2;min-width:250px;">
+        ${brkRows}
+      </div>
     </div>
   </div>
 
@@ -779,7 +861,7 @@ function renderDay(iso){
   </div>
 
   <div class="card card-pad" style="margin-bottom:20px;">
-    <div class="section-title">◈ Today's Concept</div>
+    <div class="section-title">◈ Concept of the Day</div>
     ${conceptView}
     ${conceptEditForm}
   </div>
@@ -841,7 +923,28 @@ function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, c=>({'&':'&amp;','<':
 
 function togglePrayer(iso,name){ const d=getDay(iso); d.prayers[name] = !d.prayers[name]; saveState(); render(); }
 function toggleHabit(iso,hid){ const d=getDay(iso); d.habits[hid] = !d.habits[hid]; saveState(); render(); }
-function toggleTask(iso,tid){ const d=getDay(iso); const t=d.tasks.find(x=>x.id===tid); if(t) t.done=!t.done; saveState(); render(); }
+function toggleTask(iso,tid){
+  const d=getDay(iso); const t=d.tasks.find(x=>x.id===tid); if(!t) return;
+  t.done=!t.done;
+  t.progress = t.done ? 100 : (Number(t.progress)===100 ? 0 : Number(t.progress)||0);
+  saveState(); render();
+}
+function completeTask(iso,tid){
+  const d=getDay(iso); const t=d.tasks.find(x=>x.id===tid); if(!t) return;
+  t.done = true; t.progress = 100;
+  saveState(); render();
+}
+function setTaskProgress(iso,tid,value,live){
+  const d=getDay(iso); const t=d.tasks.find(x=>x.id===tid); if(!t) return;
+  t.progress = Math.max(0, Math.min(100, parseInt(value)||0));
+  if(t.progress === 100) t.done = true;
+  saveState();
+  if(live){
+    const lbl = document.getElementById("tp-"+tid);
+    if(lbl) lbl.textContent = t.progress+"%";
+    if(t.progress === 100) render();
+  } else render();
+}
 function toggleTaskMoreFields(){
   const el = document.getElementById("taskMoreFields");
   if(el) el.style.display = el.style.display==="none" ? "block" : "none";
@@ -1121,84 +1224,109 @@ function renderTrashPage(){
 /* ============================================================
    ATTENDANCE PAGE — per subject %, flags below 75%
    ============================================================ */
-function renderAttendancePage(){
-  const stats = STATE.subjects.map(s=>{
-    let present=0, absent=0, cancelled=0;
-    Object.values(STATE.days).forEach(day=>{
-      Object.entries(day.attendance).forEach(([key,status])=>{
-        if(key.startsWith(s.id+"@")){
-          if(status==="Present") present++;
-          else if(status==="Absent") absent++;
-          else if(status==="Cancelled") cancelled++;
-        }
-      });
+/* ============================================================
+   ATTENDANCE — daily log + manual summary (two counting modes)
+   ============================================================ */
+function subjectAttendanceStats(s){
+  let present=0, absent=0, cancelled=0;
+  Object.values(STATE.days).forEach(day=>{
+    Object.entries(day.attendance||{}).forEach(([key,status])=>{
+      if(key.startsWith(s.id+"@")){
+        if(status==="Present") present++;
+        else if(status==="Absent") absent++;
+        else if(status==="Cancelled") cancelled++;
+      }
     });
-    const logHeld = present+absent;
-    const logPct = logHeld ? (present/logHeld*100) : null;
-    const m = s.manualAttendance;
-    let effAttended = present, effTotalHeld = logHeld, effPct = logPct, source = "log";
-    if(m && m.total > 0){
-      effTotalHeld = Math.max(0, m.total - (m.cancelled||0));
-      effAttended = m.attended||0;
-      effPct = effTotalHeld ? (effAttended/effTotalHeld*100) : null;
-      source = "manual";
-    }
-    const pred = effTotalHeld ? attendancePrediction(effAttended, effTotalHeld) : null;
-    return {s, present, absent, cancelled, logHeld, logPct, m, effAttended, effTotalHeld, effPct, source, pred};
   });
+  const m = s.manualAttendance;
+  let source="log", effAttended=present, effAbsent=absent, effCancelled=cancelled;
+  let effHeld = present + absent;
+
+  if(m && Number(m.total) > 0){
+    source = "manual";
+    const mode = m.countingMode || "total";
+    effCancelled = Number(m.cancelled)||0;
+    if(mode === "held"){
+      // "total" field means classes actually HELD (cancelled already excluded)
+      effHeld = Number(m.total);
+      effAttended = Number(m.attended)||0;
+      effAbsent = Math.max(0, effHeld - effAttended);
+    } else {
+      // "total" field means ALL scheduled classes, so subtract cancelled
+      effHeld = Math.max(0, Number(m.total) - effCancelled);
+      effAttended = Number(m.attended)||0;
+      effAbsent = Math.max(0, effHeld - effAttended);
+    }
+    if(m.addToLog){
+      // combine manual summary WITH the daily log instead of overriding it
+      effHeld += present + absent;
+      effAttended += present;
+      effAbsent += absent;
+      effCancelled += cancelled;
+      source = "manual+log";
+    }
+  }
+  const pct = effHeld ? (effAttended/effHeld*100) : null;
+  const pred = effHeld ? attendancePrediction(effAttended, effHeld) : null;
+  return {present, absent, cancelled, effAttended, effAbsent, effCancelled, effHeld, pct, source, pred, m};
+}
+
+let MANUAL_ATT_OPEN = null;
+function renderAttendancePage(){
+  const stats = STATE.subjects.map(s=>({s, ...subjectAttendanceStats(s)}));
 
   const rows = stats.map(st=>`
     <tr>
       <td style="font-weight:700;">${escapeHtml(st.s.name)}<div class="muted" style="font-size:11px;">${escapeHtml(st.s.code||'')}</div></td>
       <td><span class="badge ${st.s.type==='Lab'?'warn':'neutral'}">${st.s.type}</span><div class="muted" style="font-size:10.5px;margin-top:3px;">${subjectFrequencyLabel(st.s)}</div></td>
-      <td class="mono">${st.present}</td>
-      <td class="mono">${st.absent}</td>
-      <td class="mono">${st.cancelled}</td>
-      <td class="mono">${st.effTotalHeld}${st.source==='manual'?' <span class="badge neutral" style="font-size:9px;">manual</span>':''}</td>
-      <td>${st.effPct===null ? '<span class="muted">—</span>' : `<b>${st.effPct.toFixed(2)}%</b>`}</td>
-      <td>${st.effPct===null?'':(st.effPct>=75?'<span class="badge ok">Safe</span>':'<span class="badge bad">Below 75%</span>')}</td>
-      <td style="font-size:11.5px;">${st.pred ? (st.effPct>=75 ? `can miss <b>${st.pred.canMiss}</b>` : `need <b>${st.pred.needToAttend}</b> in a row`) : '—'}</td>
-      <td><button class="btn sm" onclick="toggleManualAttendance('${st.s.id}')">${st.m?'Edit manual':'+ Manual'}</button></td>
+      <td class="mono">${st.effAttended}</td>
+      <td class="mono">${st.effAbsent}</td>
+      <td class="mono">${st.effCancelled}</td>
+      <td class="mono">${st.effHeld}${st.source!=='log'?` <span class="badge neutral" style="font-size:9px;">${st.source==='manual+log'?'man+log':'manual'}</span>`:''}</td>
+      <td>${st.pct===null ? '<span class="muted">—</span>' : `<b style="color:${st.pct>=75?'var(--success)':'var(--danger)'};">${st.pct.toFixed(2)}%</b>`}</td>
+      <td>${st.pct===null?'':(st.pct>=75?'<span class="badge ok">Safe</span>':'<span class="badge bad">Below 75%</span>')}</td>
+      <td style="font-size:11.5px;">${st.pred ? (st.pct>=75 ? `can miss <b>${st.pred.canMiss}</b>` : `need <b>${st.pred.needToAttend}</b> in a row`) : '—'}</td>
+      <td><button class="btn sm" onclick="toggleManualAttendance('${st.s.id}')">${st.m?'Edit':'+ Manual'}</button></td>
       <td><button class="icon-btn" onclick="deleteSubject('${st.s.id}')">✕</button></td>
     </tr>
-    ${MANUAL_ATT_OPEN===st.s.id ? `<tr><td colspan="10" style="background:var(--paper);">
-      <div class="row" style="flex-wrap:wrap;padding:8px 0;">
-        <div><label class="field-label">Up to date</label><input type="date" id="manUpTo-${st.s.id}" value="${st.m?st.m.upToDate||'':''}" style="width:150px;"></div>
-        <div><label class="field-label">Total classes</label><input type="number" id="manTotal-${st.s.id}" value="${st.m?st.m.total:''}" style="width:100px;"></div>
-        <div><label class="field-label">Attended</label><input type="number" id="manAttended-${st.s.id}" value="${st.m?st.m.attended:''}" style="width:100px;"></div>
-        <div><label class="field-label">Cancelled</label><input type="number" id="manCancelled-${st.s.id}" value="${st.m?st.m.cancelled:''}" style="width:100px;"></div>
-        <div style="align-self:flex-end;" class="row">
-          <button class="btn primary sm" onclick="saveManualAttendance('${st.s.id}')">Save</button>
-          ${st.m?`<button class="btn sm danger" onclick="clearManualAttendance('${st.s.id}')">Clear</button>`:''}
+    ${MANUAL_ATT_OPEN===st.s.id ? `<tr><td colspan="11" style="background:var(--paper);">
+      <div style="padding:10px 0;">
+        <div class="row" style="flex-wrap:wrap;margin-bottom:10px;">
+          <div style="min-width:230px;">
+            <label class="field-label">What does "Total classes" mean?</label>
+            <select id="manMode-${st.s.id}" style="width:100%;">
+              <option value="total" ${(st.m?.countingMode||'total')==='total'?'selected':''}>All scheduled classes (cancelled will be subtracted)</option>
+              <option value="held" ${st.m?.countingMode==='held'?'selected':''}>Only classes actually held (cancelled already excluded)</option>
+            </select>
+          </div>
+          <div style="min-width:220px;">
+            <label class="field-label">Combine with daily log?</label>
+            <select id="manAdd-${st.s.id}" style="width:100%;">
+              <option value="no" ${!st.m?.addToLog?'selected':''}>Override the daily log (use only these numbers)</option>
+              <option value="yes" ${st.m?.addToLog?'selected':''}>Add to the daily log (sum both together)</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="flex-wrap:wrap;">
+          <div><label class="field-label">Up to date</label><input type="date" id="manUpTo-${st.s.id}" value="${st.m?.upToDate||''}" style="width:150px;"></div>
+          <div><label class="field-label">Total classes</label><input type="number" id="manTotal-${st.s.id}" value="${st.m?st.m.total:''}" style="width:110px;"></div>
+          <div><label class="field-label">Attended</label><input type="number" id="manAttended-${st.s.id}" value="${st.m?st.m.attended:''}" style="width:110px;"></div>
+          <div><label class="field-label">Cancelled</label><input type="number" id="manCancelled-${st.s.id}" value="${st.m?st.m.cancelled:''}" style="width:110px;"></div>
+          <div style="align-self:flex-end;" class="row">
+            <button class="btn primary sm" onclick="saveManualAttendance('${st.s.id}')">Save</button>
+            ${st.m?`<button class="btn sm danger" onclick="clearManualAttendance('${st.s.id}')">Clear</button>`:''}
+          </div>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:8px;">
+          Daily log so far for this subject: ${st.present} present · ${st.absent} absent · ${st.cancelled} cancelled.
+          Attendance % = attended ÷ (held classes), where cancelled classes never count against you.
         </div>
       </div>
     </td></tr>`:''}`).join("") || "";
 
-  // ---- CT marks with Best-N ----
-  const subjOptions = STATE.subjects.map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join("");
-  const ctBySubject = {};
-  STATE.ctMarks.forEach(ct=>{ (ctBySubject[ct.subjectId] = ctBySubject[ct.subjectId]||[]).push(ct); });
-  const ctRows = STATE.subjects.map(s=>{
-    const cts = (ctBySubject[s.id]||[]).sort((a,b)=>a.ctNo-b.ctNo);
-    if(!cts.length) return `<div class="list-item"><div style="flex:1;font-weight:700;">${escapeHtml(s.name)}</div><span class="muted" style="font-size:12px;">No CT marks yet</span></div>`;
-    const bn = ctBestNStats(cts, STATE.ctBestN);
-    const chips = bn.all.map(c=>`<span class="badge ${bn.bestSet.has(c.id)?'ok':'neutral'}" style="margin-right:4px;" title="${bn.bestSet.has(c.id)?'counted in Best '+STATE.ctBestN:'not counted'}">CT${c.ctNo}: ${c.marks}/${c.outOf} <button class="icon-btn" style="padding:0 0 0 4px;" onclick="deleteCT('${c.id}')">✕</button></span>`).join("");
-    return `<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;">
-      <div style="flex:1;min-width:180px;">
-        <div style="font-weight:700;">${escapeHtml(s.name)}</div>
-        <div style="margin-top:4px;">${chips}</div>
-        <div class="muted" style="font-size:10.5px;margin-top:4px;">Highest ${bn.highest.toFixed(1)}% · Lowest ${bn.lowest.toFixed(1)}% · All-CT avg ${bn.allAvgPct.toFixed(1)}%</div>
-      </div>
-      <div style="text-align:right;">
-        <div style="font-family:var(--font-display);font-size:22px;font-weight:600;color:var(--accent-red);">${bn.bestAvgPct.toFixed(2)}%</div>
-        <div class="muted" style="font-size:10.5px;">Best ${STATE.ctBestN} average</div>
-      </div>
-    </div>`;
-  }).join("") || `<div class="empty">Add a subject first.</div>`;
-
   return `
   <div class="between" style="margin-bottom:16px;">
-    <p class="muted" style="max-width:480px;">Mark daily attendance from each day's page, or enter a manual summary here (manual overrides the daily log for that subject). Lab frequency follows credit: ≥1.5 cr = weekly, lower = alternate weeks.</p>
+    <p class="muted" style="max-width:470px;">Mark attendance day by day, or enter a manual summary per subject — you choose whether the manual numbers <b>override</b> the daily log or <b>add to</b> it. Lab frequency follows credit: ≥1.5 cr = weekly, lower = alternate weeks.</p>
     <div class="row" style="flex-wrap:wrap;max-width:480px;">
       <input type="text" id="newSubjName" placeholder="Subject name" style="width:150px;">
       <input type="text" id="newSubjCode" placeholder="Code" style="width:80px;">
@@ -1212,34 +1340,21 @@ function renderAttendancePage(){
       <button class="btn primary sm" onclick="addSubject()">+ Add</button>
     </div>
   </div>
-  <div class="card card-pad" style="overflow-x:auto;margin-bottom:18px;">
-    ${STATE.subjects.length ? `<table style="min-width:820px;"><thead><tr><th>Subject</th><th>Type</th><th>Present</th><th>Absent</th><th>Cancelled</th><th>Held</th><th>%</th><th>Status</th><th>Prediction</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty"><div class="big">▣</div>No subjects yet — add one above, then set its weekly slot in Class Routine.</div>`}
-  </div>
-
-  <div class="card card-pad">
-    <div class="between" style="margin-bottom:4px;">
-      <div class="section-title" style="margin:0;">📝 CT (Class Test) Marks</div>
-      <div class="row"><label class="field-label" style="margin:0;">Best</label><input type="number" id="ctBestNInput" value="${STATE.ctBestN}" min="1" style="width:60px;" onchange="setCtBestN(this.value)"><span class="muted" style="font-size:12px;">of all CTs</span></div>
-    </div>
-    <div class="row" style="margin:10px 0 12px;flex-wrap:wrap;">
-      <select id="ctSubject" style="width:170px;">${subjOptions || '<option value="">Add a subject first</option>'}</select>
-      <input type="number" id="ctNo" placeholder="CT No." style="width:80px;" min="1">
-      <input type="number" id="ctMarks" placeholder="Marks" style="width:80px;">
-      <input type="number" id="ctOutOf" placeholder="Out of" style="width:80px;" value="10">
-      <button class="btn primary sm" onclick="addCT()">+ Add CT mark</button>
-    </div>
-    ${ctRows}
+  <div class="card card-pad" style="overflow-x:auto;">
+    ${STATE.subjects.length ? `<table style="min-width:860px;"><thead><tr><th>Subject</th><th>Type</th><th>Present</th><th>Absent</th><th>Cancelled</th><th>Held</th><th>%</th><th>Status</th><th>Prediction</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty"><div class="big">▣</div>No subjects yet — add one above, then set its weekly slot in Class Routine.</div>`}
   </div>`;
 }
-let MANUAL_ATT_OPEN = null;
 function toggleManualAttendance(subjectId){ MANUAL_ATT_OPEN = MANUAL_ATT_OPEN===subjectId ? null : subjectId; render(); }
 function saveManualAttendance(subjectId){
   const s = STATE.subjects.find(x=>x.id===subjectId); if(!s) return;
-  const total = parseInt(document.getElementById(`manTotal-${subjectId}`).value)||0;
-  const attended = parseInt(document.getElementById(`manAttended-${subjectId}`).value)||0;
-  const cancelled = parseInt(document.getElementById(`manCancelled-${subjectId}`).value)||0;
-  const upToDate = document.getElementById(`manUpTo-${subjectId}`).value;
-  s.manualAttendance = {total, attended, cancelled, upToDate};
+  s.manualAttendance = {
+    total: parseInt(document.getElementById(`manTotal-${subjectId}`).value)||0,
+    attended: parseInt(document.getElementById(`manAttended-${subjectId}`).value)||0,
+    cancelled: parseInt(document.getElementById(`manCancelled-${subjectId}`).value)||0,
+    upToDate: document.getElementById(`manUpTo-${subjectId}`).value,
+    countingMode: document.getElementById(`manMode-${subjectId}`).value,
+    addToLog: document.getElementById(`manAdd-${subjectId}`).value === "yes"
+  };
   MANUAL_ATT_OPEN = null;
   saveState(); render();
 }
@@ -1249,11 +1364,6 @@ function clearManualAttendance(subjectId){
   MANUAL_ATT_OPEN = null;
   saveState(); render();
 }
-function setCtBestN(v){
-  const n = parseInt(v)||1;
-  STATE.ctBestN = Math.max(1, n);
-  saveState(); render();
-}
 function addSubject(){
   const name = document.getElementById("newSubjName").value.trim();
   const code = document.getElementById("newSubjCode").value.trim();
@@ -1261,21 +1371,129 @@ function addSubject(){
   const credit = parseFloat(document.getElementById("newSubjCredit").value) || 0;
   const labWeek = document.getElementById("newSubjLabWeek").value;
   if(!name) return;
-  STATE.subjects.push({id:uid(), name, code, type, credit, labWeek, manualAttendance:null});
+  const id = uid();
+  STATE.subjects.push({id, name, code, type, credit, labWeek, manualAttendance:null});
+  // Theory subjects automatically get 4 blank CT slots; labs get none (labs have no CTs).
+  if(type === "Theory") seedCtSlots(id);
   saveState(); render();
 }
 function deleteSubject(id){
   if(!confirm("Remove this subject? Its routine slots and logged attendance stay in data but won't display.")) return;
   STATE.subjects = STATE.subjects.filter(s=>s.id!==id);
+  STATE.ctMarks = STATE.ctMarks.filter(c=>c.subjectId!==id);
   saveState(); render();
 }
-function addCT(){
-  const subjectId = document.getElementById("ctSubject").value;
-  const ctNo = parseInt(document.getElementById("ctNo").value)||1;
-  const marks = parseFloat(document.getElementById("ctMarks").value);
-  const outOf = parseFloat(document.getElementById("ctOutOf").value)||10;
-  if(!subjectId || isNaN(marks)) return;
-  STATE.ctMarks.push({id:uid(), subjectId, ctNo, marks, outOf, date:todayISO()});
+
+/* ============================================================
+   CT MARKS — own page. Theory subjects only, auto 4 slots,
+   marks out of 20, add extra CTs, best-N shown in MARKS not %.
+   ============================================================ */
+function seedCtSlots(subjectId, count){
+  count = count || CT_DEFAULT_COUNT;
+  for(let n=1; n<=count; n++){
+    if(!STATE.ctMarks.some(c=>c.subjectId===subjectId && c.ctNo===n)){
+      STATE.ctMarks.push({id:uid(), subjectId, ctNo:n, marks:null, outOf:CT_DEFAULT_OUT_OF, date:"", topic:"", note:""});
+    }
+  }
+}
+function ctBestNMarks(cts, n){
+  // Only CTs with a real entered mark count. Returns MARKS-based figures.
+  const taken = cts.filter(c=>c.marks!==null && c.marks!=='' && !isNaN(Number(c.marks)))
+                   .map(c=>({...c, marks:Number(c.marks), outOf:Number(c.outOf)||CT_DEFAULT_OUT_OF}));
+  if(!taken.length) return {taken:[], bestSet:new Set(), bestAvgMarks:null, bestOutOf:CT_DEFAULT_OUT_OF, highest:null, lowest:null, allAvgMarks:null, countUsed:0};
+  const sorted = taken.slice().sort((a,b)=> (b.marks/b.outOf) - (a.marks/a.outOf));
+  const used = sorted.slice(0, Math.min(n, sorted.length));
+  const bestSet = new Set(used.map(c=>c.id));
+  const bestAvgMarks = used.reduce((a,c)=>a+c.marks,0)/used.length;
+  const allAvgMarks = taken.reduce((a,c)=>a+c.marks,0)/taken.length;
+  const bestOutOf = used[0].outOf;
+  return {
+    taken, bestSet, bestAvgMarks, bestOutOf,
+    highest: Math.max(...taken.map(c=>c.marks)),
+    lowest: Math.min(...taken.map(c=>c.marks)),
+    allAvgMarks, countUsed: used.length
+  };
+}
+function renderCtPage(){
+  const theory = STATE.subjects.filter(s=>s.type==="Theory");
+  if(!theory.length){
+    return `<div class="card card-pad"><div class="empty"><div class="big">📝</div>No theory subjects yet. Add one on the <a href="#attendance" onclick="navigate('attendance')" style="color:var(--accent-red);font-weight:600;">Attendance</a> page — CT slots are created automatically.<br><span class="muted" style="font-size:12px;">Lab subjects don't get CTs.</span></div></div>`;
+  }
+
+  const blocks = theory.map(s=>{
+    const cts = STATE.ctMarks.filter(c=>c.subjectId===s.id).sort((a,b)=>a.ctNo-b.ctNo);
+    const bn = ctBestNMarks(cts, STATE.ctBestN);
+    const slotRows = cts.map(c=>{
+      const isBest = bn.bestSet.has(c.id);
+      const hasMark = c.marks!==null && c.marks!=='' && !isNaN(Number(c.marks));
+      return `<div class="ct-slot ${isBest?'ct-best':''}">
+        <div class="ct-slot-no">CT ${c.ctNo}${isBest?' <span class="badge ok" style="font-size:9px;">counted</span>':''}</div>
+        <div class="row" style="gap:6px;">
+          <input type="number" value="${hasMark?c.marks:''}" placeholder="—" style="width:74px;text-align:center;font-weight:700;"
+                 onchange="setCtMark('${c.id}','marks',this.value)">
+          <span class="muted" style="font-size:12px;">/</span>
+          <input type="number" value="${c.outOf||CT_DEFAULT_OUT_OF}" style="width:64px;text-align:center;"
+                 onchange="setCtMark('${c.id}','outOf',this.value)">
+          <button class="icon-btn" onclick="deleteCT('${c.id}')" title="Remove this CT slot">✕</button>
+        </div>
+        <input type="text" value="${escapeHtml(c.topic||'')}" placeholder="Topic (optional)" style="margin-top:6px;font-size:12px;"
+               onchange="setCtMark('${c.id}','topic',this.value)">
+      </div>`;
+    }).join("");
+
+    const nextNo = cts.length ? Math.max(...cts.map(c=>c.ctNo))+1 : 1;
+    return `<div class="card card-pad" style="margin-bottom:14px;">
+      <div class="between" style="align-items:flex-start;margin-bottom:12px;">
+        <div>
+          <div style="font-weight:700;font-size:15px;">${escapeHtml(s.name)}</div>
+          <div class="muted" style="font-size:11.5px;">${escapeHtml(s.code||'')} · ${bn.taken.length} of ${cts.length} CTs taken</div>
+        </div>
+        <div style="text-align:right;">
+          ${bn.bestAvgMarks===null
+            ? `<div class="muted" style="font-size:12px;">No marks entered yet</div>`
+            : `<div class="hud-marks">${bn.bestAvgMarks.toFixed(2)} <span class="hud-marks-of">/ ${bn.bestOutOf}</span></div>
+               <div class="muted" style="font-size:10.5px;">Best ${bn.countUsed} average</div>`}
+        </div>
+      </div>
+      <div class="ct-grid">${slotRows}</div>
+      <div class="row" style="margin-top:12px;justify-content:space-between;">
+        <button class="btn sm" onclick="addExtraCt('${s.id}',${nextNo})">+ Add extra CT (CT ${nextNo})</button>
+        ${bn.taken.length ? `<div class="muted" style="font-size:11.5px;">
+          Highest <b>${bn.highest}</b> · Lowest <b>${bn.lowest}</b> · All-CT avg <b>${bn.allAvgMarks.toFixed(2)}</b> / ${bn.bestOutOf}
+        </div>` : ''}
+      </div>
+    </div>`;
+  }).join("");
+
+  return `
+  <div class="between" style="margin-bottom:16px;">
+    <p class="muted" style="max-width:520px;">Every theory subject automatically gets ${CT_DEFAULT_COUNT} CT slots out of ${CT_DEFAULT_OUT_OF} marks — just type the marks as you get them. Lab subjects are excluded. Results are shown in <b>marks</b>, not percentages.</p>
+    <div class="row">
+      <label class="field-label" style="margin:0;">Best</label>
+      <input type="number" value="${STATE.ctBestN}" min="1" style="width:64px;" onchange="setCtBestN(this.value)">
+      <span class="muted" style="font-size:12px;">CTs count</span>
+    </div>
+  </div>
+  ${blocks}`;
+}
+function setCtMark(ctId, field, value){
+  const c = STATE.ctMarks.find(x=>x.id===ctId); if(!c) return;
+  if(field==="marks"){
+    c.marks = (value===""||value===null) ? null : parseFloat(value);
+    if(c.marks!==null && !c.date) c.date = todayISO();
+  } else if(field==="outOf"){
+    c.outOf = parseFloat(value)||CT_DEFAULT_OUT_OF;
+  } else {
+    c[field] = value;
+  }
+  saveState(); render();
+}
+function addExtraCt(subjectId, ctNo){
+  STATE.ctMarks.push({id:uid(), subjectId, ctNo, marks:null, outOf:CT_DEFAULT_OUT_OF, date:"", topic:"", note:""});
+  saveState(); render();
+}
+function setCtBestN(v){
+  STATE.ctBestN = Math.max(1, parseInt(v)||1);
   saveState(); render();
 }
 function deleteCT(id){
@@ -2016,8 +2234,13 @@ function renderDashboard(){
 
   const ctBySubjectDash = {};
   STATE.ctMarks.forEach(ct=>{ (ctBySubjectDash[ct.subjectId]=ctBySubjectDash[ct.subjectId]||[]).push(ct); });
-  const ctSubjectAverages = Object.values(ctBySubjectDash).map(cts=>ctBestNStats(cts, STATE.ctBestN).bestAvgPct).filter(v=>v!==null && !isNaN(v));
-  const ctOverallAvg = ctSubjectAverages.length ? Math.round(ctSubjectAverages.reduce((a,b)=>a+b,0)/ctSubjectAverages.length) : null;
+  const ctSubjectAverages = Object.values(ctBySubjectDash)
+    .map(cts=>ctBestNMarks(cts, STATE.ctBestN))
+    .filter(bn=>bn.bestAvgMarks!==null);
+  const ctOverallAvg = ctSubjectAverages.length
+    ? (ctSubjectAverages.reduce((a,bn)=>a+bn.bestAvgMarks,0)/ctSubjectAverages.length)
+    : null;
+  const ctOverallOutOf = ctSubjectAverages.length ? ctSubjectAverages[0].bestOutOf : CT_DEFAULT_OUT_OF;
   let unfinishedTasks = 0;
   Object.values(STATE.days).forEach(day=> unfinishedTasks += day.tasks.filter(t=>!t.done).length);
 
@@ -2028,10 +2251,12 @@ function renderDashboard(){
     {label:"Spent (30d)", value:"৳"+spent.toLocaleString(), bg:"#F3E5F5", color:"#8E24AA"},
     {label:"Reading Avg", value:readingAvg+"%", bg:"var(--paper)", color:"var(--isha)"},
     {label:"Dev Progress", value:devOverall+"%", bg:"var(--paper)", color:"#5C6BC0"},
-    {label:`CT Avg (Best ${STATE.ctBestN})`, value: ctOverallAvg===null?"—":ctOverallAvg+"%", bg:"var(--paper)", color:"var(--maghrib)"},
+    {label:`CT Avg (Best ${STATE.ctBestN})`, value: ctOverallAvg===null?"—":`${ctOverallAvg.toFixed(1)}/${ctOverallOutOf}`, bg:"var(--paper)", color:"var(--maghrib)"},
     {label:"Unfinished Tasks", value: String(unfinishedTasks), bg: unfinishedTasks>0 ? "var(--danger-soft)" : "var(--success-soft)", color: unfinishedTasks>0 ? "var(--danger)" : "var(--success)"},
   ];
   const kpis = cards.map(c=>`<div class="kpi" style="background:${c.bg};"><div class="label" style="color:${c.color};">${c.label}</div><div class="value" style="color:${c.color};">${c.value}</div></div>`).join("");
+  const todayComp = dailyCompletion(todayISO());
+  const dl = collectDeadlines();
 
   // top habits this month
   const {y,m} = PAGE_MONTH;
@@ -2054,6 +2279,28 @@ function renderDashboard(){
   });
 
   return `
+  <div class="card card-pad" style="margin-bottom:18px;">
+    <div class="hud-ring-wrap">
+      ${speedometerSvg(todayComp.overall, 146, "TODAY")}
+      <div style="flex:1;min-width:220px;">
+        <div class="section-title" style="margin-bottom:6px;">Today</div>
+        <div class="hud-big">${todayComp.overall}%</div>
+        <div class="hud-sub">${fmtDate(todayISO())}</div>
+        <button class="btn sm primary" style="margin-top:10px;" onclick="navigate('day',{date:'${todayISO()}'})">Open today's workspace →</button>
+      </div>
+      <div style="flex:1.1;min-width:230px;">
+        ${todayComp.parts.map(p=>`<div class="brk"><div class="brk-label">${p.key}</div><div class="brk-bar"><div class="brk-fill" style="width:${p.pct}%;"></div></div><div class="brk-val">${p.raw}</div></div>`).join("")}
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-4" style="margin-bottom:18px;">
+    <div class="kpi" style="background:var(--danger-soft);cursor:pointer;" onclick="navigate('reminders')"><div class="label" style="color:var(--danger);">🔴 Overdue</div><div class="value" style="color:var(--danger);">${dl.overdue.length}</div></div>
+    <div class="kpi" style="background:var(--warn-soft);cursor:pointer;" onclick="navigate('reminders')"><div class="label" style="color:var(--warn);">🟠 Due Today</div><div class="value" style="color:var(--warn);">${dl.today.length}</div></div>
+    <div class="kpi" style="background:var(--accent-soft);cursor:pointer;" onclick="navigate('reminders')"><div class="label" style="color:var(--accent);">🟡 Due Tomorrow</div><div class="value" style="color:var(--accent);">${dl.tomorrow.length}</div></div>
+    <div class="kpi" style="background:var(--paper);cursor:pointer;" onclick="navigate('reminders')"><div class="label">📅 This Week</div><div class="value">${dl.week.length}</div></div>
+  </div>
+
   <div class="grid grid-4" style="margin-bottom:20px;">${kpis}</div>
   <div class="grid grid-2" style="margin-bottom:16px;">
     <div class="card card-pad">
@@ -2235,6 +2482,15 @@ function renderSettingsPage(){
       <input type="file" accept="application/json" onchange="restoreBackup(event)">
     </div>
     <div class="card card-pad">
+      <div class="section-title">🎨 Theme</div>
+      <p class="muted">Spider-Man is the light theme (warm paper, spider red + blue). Batman is the dark theme (graphite black, bat gold). Your choice syncs across devices.</p>
+      <div class="row">
+        <button class="btn ${(STATE.settings.theme||'light')==='light'?'primary':''}" onclick="setTheme('light')">🕷 Spider-Man (Light)</button>
+        <button class="btn ${STATE.settings.theme==='dark'?'primary':''}" onclick="setTheme('dark')">🦇 Batman (Dark)</button>
+      </div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px;">Data version: ${STATE.dataVersion}</div>
+    </div>
+    <div class="card card-pad">
       <div class="section-title">🖨️ Export as PDF</div>
       <p class="muted">Open a Day page and use "Export / Print this day" — your browser's Print dialog lets you Save as PDF. Works for any page.</p>
       <button class="btn" onclick="navigate('day',{date:'${todayISO()}'})">Go to Today</button>
@@ -2260,7 +2516,7 @@ function restoreBackup(evt){
   reader.onload = () => {
     try{
       const data = JSON.parse(reader.result);
-      if(!confirm("This will replace all current data with the backup. Continue?")) return;
+      if(!confirm("This will modify your current Life Tracker data — everything now in this browser will be replaced by the backup. Continue?")) return;
       STATE = data;
       saveState();
       alert("Restored successfully.");
@@ -2320,7 +2576,7 @@ function runSearch(qRaw){
   STATE.subjects.forEach(s=>{ if(has(s.name)||has(s.code)) hits.push({type:"Subject", label:s.name, sub:s.code||"", go:()=>searchGoTo("attendance")}); });
   STATE.ctMarks.forEach(c=>{
     const subj = STATE.subjects.find(s=>s.id===c.subjectId);
-    if(subj && has(subj.name)) hits.push({type:"CT Mark", label:`${subj.name} — CT${c.ctNo}`, sub:`${c.marks}/${c.outOf}`, go:()=>searchGoTo("attendance")});
+    if(subj && has(subj.name) && c.marks!==null && c.marks!=='') hits.push({type:"CT Mark", label:`${subj.name} — CT${c.ctNo}`, sub:`${c.marks}/${c.outOf}`, go:()=>searchGoTo("ct")});
   });
 
   if(!hits.length){ resultsEl.innerHTML = `<div class="empty">No matches.</div>`; return; }
@@ -2341,7 +2597,7 @@ const QUICK_ADD_ITEMS = [
   {label:"Expense", ic:"৳", go:()=>navigate("day",{date:todayISO()})},
   {label:"Money Received", ic:"📥", go:()=>navigate("finance")},
   {label:"Attendance", ic:"▣", go:()=>navigate("day",{date:todayISO()})},
-  {label:"CT Mark", ic:"📝", go:()=>navigate("attendance")},
+  {label:"CT Mark", ic:"📝", go:()=>navigate("ct")},
   {label:"Reading", ic:"▥", go:()=>navigate("reading")},
   {label:"Course", ic:"🎓", go:()=>navigate("courses")},
   {label:"Research", ic:"🔬", go:()=>navigate("research")},
@@ -2366,6 +2622,421 @@ function runQuickAdd(i){
 /* ============================================================
    CINEMATIC LOADER
    ============================================================ */
+/* ============================================================
+   DEADLINE INTELLIGENCE
+   ============================================================ */
+function daysBetween(a, b){
+  return Math.round((new Date(b+"T00:00:00") - new Date(a+"T00:00:00")) / 86400000);
+}
+function collectDeadlines(){
+  const T = todayISO();
+  const items = [];
+  // tasks with deadlines (or dated but unfinished)
+  Object.keys(STATE.days).forEach(iso=>{
+    STATE.days[iso].tasks.forEach(t=>{
+      if(t.done) return;
+      const due = t.deadline || iso;
+      items.push({kind:"Task", label:t.text, category:t.category||"Others", due, goto:()=>navigate("day",{date:iso})});
+    });
+  });
+  // course target dates
+  STATE.courses.forEach(c=>{
+    if(c.targetDate && c.status!=="Completed" && c.status!=="Archived"){
+      items.push({kind:"Course", label:c.name, category:c.platform||"", due:c.targetDate, goto:()=>navigate("courses")});
+    }
+  });
+  // research deadlines
+  STATE.research.projects.forEach(p=>{
+    if(p.deadline && p.status!=="Published" && p.status!=="Archived"){
+      items.push({kind:"Research", label:p.title, category:p.area||"", due:p.deadline, goto:()=>navigate("research")});
+    }
+  });
+  // reading target dates
+  STATE.reading.forEach(b=>{
+    if(b.targetDate && b.status!=="Completed"){
+      items.push({kind:"Reading", label:b.title, category:b.type||"", due:b.targetDate, goto:()=>navigate("reading")});
+    }
+  });
+  // dev items with deadlines
+  ["papers","cse","eee"].forEach(k=>{
+    (STATE.dev[k]||[]).forEach(it=>{
+      if(it.deadline && Number(it.progress) < 100){
+        items.push({kind:"Dev", label:it.title, category:k.toUpperCase(), due:it.deadline, goto:()=>navigate("dev")});
+      }
+    });
+  });
+
+  const buckets = {overdue:[], today:[], tomorrow:[], week:[], later:[]};
+  items.forEach(it=>{
+    const d = daysBetween(T, it.due);
+    it.daysLeft = d;
+    if(d < 0) buckets.overdue.push(it);
+    else if(d === 0) buckets.today.push(it);
+    else if(d === 1) buckets.tomorrow.push(it);
+    else if(d <= 7) buckets.week.push(it);
+    else buckets.later.push(it);
+  });
+  Object.values(buckets).forEach(b=>b.sort((x,y)=>x.daysLeft-y.daysLeft));
+  return buckets;
+}
+
+/* ============================================================
+   SMART REMINDER CENTER
+   ============================================================ */
+function buildReminders(){
+  const T = todayISO();
+  const out = [];
+  const b = collectDeadlines();
+
+  b.overdue.forEach(it=> out.push({sev:"red", icon:"⚠️", text:`${it.kind} overdue by ${Math.abs(it.daysLeft)}d — ${it.label}`, goto:it.goto}));
+  b.today.forEach(it=> out.push({sev:"orange", icon:"⏰", text:`${it.kind} due today — ${it.label}`, goto:it.goto}));
+  b.tomorrow.forEach(it=> out.push({sev:"orange", icon:"⚠️", text:`${it.kind} due tomorrow — ${it.label}`, goto:it.goto}));
+  b.week.forEach(it=> out.push({sev:"yellow", icon:"📅", text:`${it.kind} due in ${it.daysLeft}d — ${it.label}`, goto:it.goto}));
+
+  // attendance warnings
+  STATE.subjects.forEach(s=>{
+    const st = subjectAttendanceStats(s);
+    if(st.pct !== null && st.pct < 75){
+      out.push({sev:"red", icon:"▣", text:`Attendance at ${st.pct.toFixed(1)}% in ${s.name} — need ${st.pred.needToAttend} in a row`, goto:()=>navigate("attendance")});
+    } else if(st.pct !== null && st.pct < 80){
+      out.push({sev:"yellow", icon:"▣", text:`${s.name} attendance ${st.pct.toFixed(1)}% — only ${st.pred.canMiss} class(es) of slack`, goto:()=>navigate("attendance")});
+    }
+  });
+
+  // CT slots still blank
+  STATE.subjects.filter(s=>s.type==="Theory").forEach(s=>{
+    const cts = STATE.ctMarks.filter(c=>c.subjectId===s.id);
+    const blank = cts.filter(c=>c.marks===null || c.marks==="").length;
+    if(cts.length && blank === cts.length){
+      out.push({sev:"yellow", icon:"📝", text:`No CT marks entered yet for ${s.name}`, goto:()=>navigate("ct")});
+    }
+  });
+
+  // research staleness
+  STATE.research.projects.forEach(p=>{
+    if(p.lastUpdated && p.status!=="Published" && p.status!=="Archived"){
+      const idle = daysBetween(p.lastUpdated, T);
+      if(idle >= 7) out.push({sev:"yellow", icon:"🔬", text:`Research "${p.title}" untouched for ${idle}d`, goto:()=>navigate("research")});
+    }
+  });
+
+  // today's own hygiene
+  const comp = dailyCompletion(T);
+  const prayerPart = comp.parts.find(p=>p.key==="Prayer");
+  if(prayerPart && prayerPart.done < 5) out.push({sev:"yellow", icon:"☾", text:`${5-prayerPart.done} prayer(s) not logged today`, goto:()=>navigate("day",{date:T})});
+  if(!(STATE.days[T] && STATE.days[T].journal && STATE.days[T].journal.trim()))
+    out.push({sev:"yellow", icon:"✎", text:"Today's journal is still empty", goto:()=>navigate("day",{date:T})});
+
+  const order = {red:0, orange:1, yellow:2};
+  out.sort((a,b2)=>order[a.sev]-order[b2.sev]);
+  return out;
+}
+function renderRemindersPage(){
+  const rem = buildReminders();
+  window.__reminders = rem;
+  const dotColor = {red:"var(--danger)", orange:"var(--warn)", yellow:"var(--accent)"};
+  const body = rem.length ? rem.map((r,i)=>`
+    <div class="sev sev-${r.sev}" style="cursor:pointer;" onclick="window.__reminders[${i}].goto()">
+      <span class="sev-dot" style="background:${dotColor[r.sev]};"></span>
+      <span style="font-size:15px;">${r.icon}</span>
+      <div style="flex:1;font-size:13px;font-weight:600;">${escapeHtml(r.text)}</div>
+    </div>`).join("") : `<div class="empty"><div class="big">✓</div>Nothing needs your attention right now.</div>`;
+
+  const counts = rem.reduce((a,r)=>{ a[r.sev]=(a[r.sev]||0)+1; return a; }, {});
+  return `
+  <div class="grid grid-3" style="margin-bottom:18px;">
+    <div class="kpi" style="background:var(--danger-soft);"><div class="label" style="color:var(--danger);">🔴 Critical</div><div class="value" style="color:var(--danger);">${counts.red||0}</div></div>
+    <div class="kpi" style="background:var(--warn-soft);"><div class="label" style="color:var(--warn);">🟠 Soon</div><div class="value" style="color:var(--warn);">${counts.orange||0}</div></div>
+    <div class="kpi" style="background:var(--accent-soft);"><div class="label" style="color:var(--accent);">🟡 Watch</div><div class="value" style="color:var(--accent);">${counts.yellow||0}</div></div>
+  </div>
+  <div class="card card-pad">
+    <div class="section-title">🔔 Reminder Center</div>
+    <p class="muted" style="margin:0 0 12px;">Everything the tracker noticed on its own — click any row to jump straight there.</p>
+    ${body}
+  </div>`;
+}
+
+/* ============================================================
+   WEEKLY / MONTHLY REVIEW
+   ============================================================ */
+function isoRange(startIso, days){
+  const out = [];
+  const d = new Date(startIso+"T00:00:00");
+  for(let i=0;i<days;i++){
+    out.push(d.toISOString().slice(0,10));
+    d.setDate(d.getDate()+1);
+  }
+  return out;
+}
+function periodStats(isos){
+  let prayerDone=0, prayerTotal=0, habitDone=0, habitTotal=0, taskDone=0, taskTotal=0, spent=0, received=0;
+  const dayScores = [];
+  const habitCounts = {};
+  STATE.habitsList.forEach(h=>habitCounts[h.id]={name:h.name, done:0, seen:0});
+
+  isos.forEach(iso=>{
+    const day = STATE.days[iso];
+    const comp = dailyCompletion(iso);
+    if(day) dayScores.push({iso, score:comp.overall});
+    prayerTotal += 5;
+    if(day){
+      prayerDone += PRAYERS.filter(p=>day.prayers[p.name]).length;
+      habitTotal += STATE.habitsList.length;
+      STATE.habitsList.forEach(h=>{
+        habitCounts[h.id].seen++;
+        if(day.habits[h.id]){ habitDone++; habitCounts[h.id].done++; }
+      });
+      taskTotal += day.tasks.length;
+      taskDone += day.tasks.filter(t=>t.done).length;
+      day.expenses.forEach(e=> spent += Number(e.amount||0));
+    }
+  });
+  STATE.moneyIn.forEach(m=>{ if(isos.includes(m.date)) received += Number(m.amount||0); });
+
+  const ranked = Object.values(habitCounts).filter(h=>h.seen>0)
+    .map(h=>({name:h.name, pct: Math.round(h.done/h.seen*100)}))
+    .sort((a,b)=>b.pct-a.pct);
+  const productivity = dayScores.length ? Math.round(dayScores.reduce((a,d)=>a+d.score,0)/dayScores.length) : 0;
+  const best = dayScores.slice().sort((a,b)=>b.score-a.score)[0] || null;
+  const worst = dayScores.slice().sort((a,b)=>a.score-b.score)[0] || null;
+
+  return {
+    productivity,
+    prayerPct: prayerTotal? Math.round(prayerDone/prayerTotal*100):0,
+    habitPct: habitTotal? Math.round(habitDone/habitTotal*100):0,
+    taskDone, taskTotal,
+    taskPct: taskTotal? Math.round(taskDone/taskTotal*100):0,
+    spent, received, net: received-spent,
+    bestHabit: ranked[0]||null, worstHabit: ranked.length>1?ranked[ranked.length-1]:null,
+    bestDay: best, worstDay: worst, dayScores
+  };
+}
+let REVIEW_TAB = "week";
+function renderReviewPage(){
+  const T = todayISO();
+  const isWeek = REVIEW_TAB === "week";
+
+  // week starts Saturday (Bangladesh)
+  const todayDow = dowIndexBD(T);
+  const weekStart = new Date(T+"T00:00:00");
+  weekStart.setDate(weekStart.getDate() - todayDow);
+  const weekIsos = isoRange(weekStart.toISOString().slice(0,10), 7);
+
+  const monthStart = T.slice(0,8)+"01";
+  const dim = daysInMonth(Number(T.slice(0,4)), Number(T.slice(5,7))-1);
+  const monthIsos = isoRange(monthStart, dim);
+
+  const isos = isWeek ? weekIsos : monthIsos;
+  const st = periodStats(isos);
+  const rangeLabel = isWeek
+    ? `${fmtShort(weekIsos[0])} — ${fmtShort(weekIsos[6])}`
+    : new Date(T+"T00:00:00").toLocaleDateString('en-GB',{month:'long', year:'numeric'});
+
+  // academic aggregate
+  const courseAvg = STATE.courses.length ? Math.round(STATE.courses.reduce((a,c)=>a+courseProgress(c),0)/STATE.courses.length) : null;
+  const researchAvg = STATE.research.projects.length ? Math.round(STATE.research.projects.reduce((a,p)=>a+(Number(p.progress)||0),0)/STATE.research.projects.length) : null;
+  const ctAverages = STATE.subjects.filter(s=>s.type==="Theory")
+    .map(s=>ctBestNMarks(STATE.ctMarks.filter(c=>c.subjectId===s.id), STATE.ctBestN))
+    .filter(bn=>bn.bestAvgMarks!==null);
+  const ctAvg = ctAverages.length ? (ctAverages.reduce((a,bn)=>a+bn.bestAvgMarks,0)/ctAverages.length) : null;
+  const attStats = STATE.subjects.map(s=>subjectAttendanceStats(s)).filter(x=>x.pct!==null);
+  const attAvg = attStats.length ? (attStats.reduce((a,x)=>a+x.pct,0)/attStats.length) : null;
+
+  const wentWell = [];
+  const missed = [];
+  if(st.prayerPct >= 90) wentWell.push(`Prayers held strong at ${st.prayerPct}%`);
+  else missed.push(`Prayers at ${st.prayerPct}% — room to improve`);
+  if(st.habitPct >= 75) wentWell.push(`Habits at ${st.habitPct}%`);
+  else missed.push(`Habits at only ${st.habitPct}%`);
+  if(st.taskPct >= 75) wentWell.push(`Completed ${st.taskDone}/${st.taskTotal} tasks`);
+  else if(st.taskTotal) missed.push(`Only ${st.taskDone} of ${st.taskTotal} tasks finished`);
+  if(st.bestHabit) wentWell.push(`Best habit: ${st.bestHabit.name} (${st.bestHabit.pct}%)`);
+  if(st.worstHabit && st.worstHabit.pct < 50) missed.push(`Weakest habit: ${st.worstHabit.name} (${st.worstHabit.pct}%)`);
+  if(attAvg !== null && attAvg < 75) missed.push(`Average attendance ${attAvg.toFixed(1)}% is below 75%`);
+  const dl = collectDeadlines();
+  if(dl.overdue.length) missed.push(`${dl.overdue.length} item(s) overdue`);
+
+  const priorities = [];
+  if(dl.overdue.length) priorities.push(`Clear ${dl.overdue.length} overdue item(s) first`);
+  if(attAvg !== null && attAvg < 75) priorities.push("Attend every class — attendance is under the 75% line");
+  if(st.worstHabit && st.worstHabit.pct < 50) priorities.push(`Rebuild the habit: ${st.worstHabit.name}`);
+  if(dl.week.length) priorities.push(`${dl.week.length} deadline(s) land within 7 days`);
+  if(!priorities.length) priorities.push("Keep the current pace — nothing is at risk");
+
+  const listOf = (arr, empty)=> arr.length
+    ? `<ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.8;">${arr.map(x=>`<li>${escapeHtml(x)}</li>`).join("")}</ul>`
+    : `<div class="muted" style="font-size:12.5px;">${empty}</div>`;
+
+  const dayBars = st.dayScores.length ? st.dayScores.map(d=>`
+    <div class="brk">
+      <div class="brk-label">${fmtShort(d.iso)}</div>
+      <div class="brk-bar"><div class="brk-fill" style="width:${d.score}%;"></div></div>
+      <div class="brk-val">${d.score}%</div>
+    </div>`).join("") : `<div class="muted" style="font-size:12.5px;">No logged days in this period yet.</div>`;
+
+  return `
+  <div class="between" style="margin-bottom:16px;">
+    <div class="pill-tabs">
+      <button class="pill-tab ${isWeek?'active':''}" onclick="REVIEW_TAB='week';render()">📊 Weekly</button>
+      <button class="pill-tab ${!isWeek?'active':''}" onclick="REVIEW_TAB='month';render()">📅 Monthly</button>
+    </div>
+    <div class="muted" style="font-weight:600;">${rangeLabel}</div>
+  </div>
+
+  <div class="card card-pad" style="margin-bottom:16px;">
+    <div class="hud-ring-wrap">
+      ${speedometerSvg(st.productivity, 150, isWeek?"THIS WEEK":"THIS MONTH")}
+      <div style="flex:1;min-width:230px;">
+        <div class="section-title" style="margin-bottom:6px;">Productivity</div>
+        <div class="hud-big">${st.productivity}%</div>
+        <div class="hud-sub">average daily completion across ${st.dayScores.length} logged day(s)</div>
+      </div>
+      <div style="flex:1.2;min-width:250px;">
+        <div class="brk"><div class="brk-label">Prayer</div><div class="brk-bar"><div class="brk-fill" style="width:${st.prayerPct}%;"></div></div><div class="brk-val">${st.prayerPct}%</div></div>
+        <div class="brk"><div class="brk-label">Habits</div><div class="brk-bar"><div class="brk-fill" style="width:${st.habitPct}%;"></div></div><div class="brk-val">${st.habitPct}%</div></div>
+        <div class="brk"><div class="brk-label">Tasks</div><div class="brk-bar"><div class="brk-fill" style="width:${st.taskPct}%;"></div></div><div class="brk-val">${st.taskDone}/${st.taskTotal}</div></div>
+        ${attAvg!==null?`<div class="brk"><div class="brk-label">Attendance</div><div class="brk-bar"><div class="brk-fill" style="width:${attAvg}%;"></div></div><div class="brk-val">${attAvg.toFixed(1)}%</div></div>`:''}
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-4" style="margin-bottom:16px;">
+    <div class="kpi" style="background:var(--paper);"><div class="label">Spent</div><div class="value">৳${st.spent.toLocaleString()}</div></div>
+    <div class="kpi" style="background:var(--paper);"><div class="label">Received</div><div class="value">৳${st.received.toLocaleString()}</div></div>
+    <div class="kpi" style="background:${st.net>=0?'var(--success-soft)':'var(--danger-soft)'};"><div class="label" style="color:${st.net>=0?'var(--success)':'var(--danger)'};">Net</div><div class="value" style="color:${st.net>=0?'var(--success)':'var(--danger)'};">${st.net>=0?'+':''}৳${st.net.toLocaleString()}</div></div>
+    <div class="kpi" style="background:var(--paper);"><div class="label">CT Avg (Best ${STATE.ctBestN})</div><div class="value">${ctAvg===null?'—':ctAvg.toFixed(1)}</div></div>
+  </div>
+
+  <div class="grid grid-2" style="margin-bottom:16px;">
+    <div class="card card-pad">
+      <div class="section-title">✅ What went well</div>
+      ${listOf(wentWell, "Not enough data logged yet.")}
+    </div>
+    <div class="card card-pad">
+      <div class="section-title">⚠️ What was missed</div>
+      ${listOf(missed, "Nothing flagged — clean period.")}
+    </div>
+    <div class="card card-pad">
+      <div class="section-title">🎯 ${isWeek?"Next week's":"Next month's"} priorities</div>
+      ${listOf(priorities, "")}
+    </div>
+    <div class="card card-pad">
+      <div class="section-title">📈 Academic & growth</div>
+      <div class="brk"><div class="brk-label">Courses</div><div class="brk-bar"><div class="brk-fill" style="width:${courseAvg||0}%;"></div></div><div class="brk-val">${courseAvg===null?'—':courseAvg+'%'}</div></div>
+      <div class="brk"><div class="brk-label">Research</div><div class="brk-bar"><div class="brk-fill" style="width:${researchAvg||0}%;"></div></div><div class="brk-val">${researchAvg===null?'—':researchAvg+'%'}</div></div>
+      <div class="brk"><div class="brk-label">Dev</div><div class="brk-bar"><div class="brk-fill" style="width:${Math.round((devAvg('papers')+devAvg('cse')+devAvg('eee'))/3)}%;"></div></div><div class="brk-val">${Math.round((devAvg('papers')+devAvg('cse')+devAvg('eee'))/3)}%</div></div>
+      ${st.bestDay?`<div class="divider"></div><div class="muted" style="font-size:12px;">Best day: <b>${fmtShort(st.bestDay.iso)}</b> at ${st.bestDay.score}% · Lowest: <b>${fmtShort(st.worstDay.iso)}</b> at ${st.worstDay.score}%</div>`:''}
+    </div>
+  </div>
+
+  <div class="card card-pad">
+    <div class="section-title">Day by day</div>
+    ${dayBars}
+  </div>`;
+}
+
+/* ============================================================
+   THEME
+   ============================================================ */
+function applyTheme(){
+  const theme = (STATE.settings && STATE.settings.theme) || "light";
+  document.documentElement.setAttribute("data-theme", theme);
+}
+function setTheme(t){
+  if(!STATE.settings) STATE.settings = {};
+  STATE.settings.theme = t;
+  applyTheme();
+  saveState();
+  render();
+}
+
+/* ============================================================
+   DAILY COMPLETION ENGINE  (real 0–100%, with breakdown)
+   ============================================================ */
+function dailyCompletion(iso){
+  const day = STATE.days[iso];
+  const parts = [];
+
+  // Prayers — 5 slots
+  const pDone = day ? PRAYERS.filter(p=>day.prayers[p.name]).length : 0;
+  parts.push({key:"Prayer", done:pDone, total:5, pct: pDone/5*100, raw:`${pDone}/5`});
+
+  // Habits — however many are defined
+  const hTotal = STATE.habitsList.length;
+  const hDone = day ? STATE.habitsList.filter(h=>day.habits[h.id]).length : 0;
+  if(hTotal) parts.push({key:"Habits", done:hDone, total:hTotal, pct:hDone/hTotal*100, raw:`${hDone}/${hTotal}`});
+
+  // Tasks — partial credit via each task's own progress slider
+  const tasks = day ? day.tasks : [];
+  if(tasks.length){
+    const sum = tasks.reduce((a,t)=>a + (t.done ? 100 : Number(t.progress)||0), 0);
+    parts.push({key:"Tasks", done:tasks.filter(t=>t.done).length, total:tasks.length, pct:sum/tasks.length, raw:`${tasks.filter(t=>t.done).length}/${tasks.length}`});
+  }
+
+  // Attendance — classes marked today vs scheduled today
+  const dowIdx = dowIndexBD(iso);
+  const scheduled = (STATE.routine[dowIdx]||[]).filter(cls=>{
+    const subj = STATE.subjects.find(s=>s.id===cls.subjectId);
+    return subj ? labOccursOnDate(subj, iso) : true;
+  });
+  if(scheduled.length){
+    let attended=0, counted=0;
+    scheduled.forEach(cls=>{
+      const st = day ? day.attendance[cls.subjectId+"@"+cls.time] : null;
+      if(st==="Cancelled") return;
+      counted++;
+      if(st==="Present") attended++;
+    });
+    if(counted) parts.push({key:"Attendance", done:attended, total:counted, pct:attended/counted*100, raw:`${attended}/${counted}`});
+  }
+
+  // Concept — set or not
+  const hasConcept = !!(day && day.concept && day.concept.topic);
+  parts.push({key:"Concept", done:hasConcept?1:0, total:1, pct:hasConcept?100:0, raw:hasConcept?"set":"—"});
+
+  // Journal — written or not
+  const hasJournal = !!(day && day.journal && day.journal.trim());
+  parts.push({key:"Journal", done:hasJournal?1:0, total:1, pct:hasJournal?100:0, raw:hasJournal?"written":"—"});
+
+  const overall = parts.length ? Math.round(parts.reduce((a,p)=>a+p.pct,0)/parts.length) : 0;
+  return {overall, parts};
+}
+
+/* Speedometer arc: 240° sweep, value 0–100 */
+function speedometerSvg(pct, size, label){
+  size = size || 132;
+  pct = Math.max(0, Math.min(100, Math.round(pct)));
+  const r = 52, cx = 70, cy = 66;
+  const startA = 150, sweep = 240;                 // degrees
+  const toXY = (ang)=>{
+    const rad = (ang*Math.PI)/180;
+    return [cx + r*Math.cos(rad), cy + r*Math.sin(rad)];
+  };
+  const arcPath = (fromA, toA)=>{
+    const [x1,y1] = toXY(fromA), [x2,y2] = toXY(toA);
+    const large = Math.abs(toA-fromA) > 180 ? 1 : 0;
+    return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
+  };
+  const trackLen = 2*Math.PI*r*(sweep/360);
+  const tickMarks = [0,25,50,75,100].map(t=>{
+    const a = startA + (sweep*t/100);
+    const [ox,oy] = toXY(a);
+    const rad = (a*Math.PI)/180;
+    const ix = cx + (r-8)*Math.cos(rad), iy = cy + (r-8)*Math.sin(rad);
+    return `<line x1="${ix.toFixed(1)}" y1="${iy.toFixed(1)}" x2="${ox.toFixed(1)}" y2="${oy.toFixed(1)}" stroke="var(--ink-soft)" stroke-width="1.4" opacity=".45"/>`;
+  }).join("");
+  return `<div class="speedo">
+    <svg viewBox="0 0 140 100" width="${size}" height="${Math.round(size*100/140)}" role="img" aria-label="${pct} percent">
+      <path d="${arcPath(startA, startA+sweep)}" class="speedo-track" fill="none" stroke-width="9" stroke-linecap="round"/>
+      <path d="${arcPath(startA, startA+sweep)}" class="speedo-fill" fill="none" stroke-width="9" stroke-linecap="round"
+            stroke-dasharray="${trackLen.toFixed(2)}" stroke-dashoffset="${(trackLen*(1-pct/100)).toFixed(2)}"/>
+      ${tickMarks}
+      <text x="70" y="70" text-anchor="middle" class="speedo-value" font-size="26">${pct}%</text>
+    </svg>
+    ${label?`<div class="speedo-label">${label}</div>`:""}
+  </div>`;
+}
+
 function runLoader(){
   const loader = document.getElementById("loader");
   if(!loader) return;
@@ -2386,6 +3057,7 @@ function runLoader(){
     const [page, date] = h.split("/");
     if(page) ROUTE = {page, params: date?{date}:{}};
   }
+  applyTheme();
   render();
   if(gistConfigured()) autoPullOnLoad();
   runLoader();
